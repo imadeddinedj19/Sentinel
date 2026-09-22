@@ -3,3 +3,6 @@
 mcp>=2.2
 databricks-sdk>=0.30
 python-dotenv>=1.0
+# For hosting over HTTP as a Databricks App (app_http.py). Pulled in by mcp too,
+# but pinned here because app_http.py imports it directly.
+uvicorn>=0.30

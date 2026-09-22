@@ -1,0 +1,30 @@
+# Databricks App runtime configuration.
+#
+# Deployed by the bundle at the repo root (databricks.yml) or directly with
+# `databricks apps deploy`. The app's working directory is this folder's contents,
+# so `app_http.py` and `server.py` are top-level modules here.
+#
+# app_http.py reads the port from the DATABRICKS_APP_PORT env var that Databricks
+# injects, and binds uvicorn to 0.0.0.0. Inside the app the Databricks SDK
+# authenticates automatically as the app's service principal — no token is needed
+# or wanted here. Grant that principal access to the warehouse and tables instead.
+
+command:
+  - python
+  - app_http.py
+
+env:
+  # Writes stay OFF until you deliberately enable them. Set to "1" only once the
+  # app's service principal has exactly the permissions you intend it to have.
+  - name: DATABRICKS_MCP_ALLOW_WRITES
+    value: "0"
+
+  # REQUIRED: the SQL warehouse the read/query tools run against.
+  - name: DATABRICKS_WAREHOUSE_ID
+    value: "REPLACE_WITH_WAREHOUSE_ID"
+
+  # Where Sentinel's tables live (defaults match the ingest notebook).
+  - name: DATABRICKS_MCP_CATALOG
+    value: "workspace"
+  - name: DATABRICKS_MCP_SCHEMA
+    value: "sentinel"

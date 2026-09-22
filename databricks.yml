@@ -1,0 +1,39 @@
+# Databricks Asset Bundle (now also called a Declarative Automation Bundle).
+#
+# Deploys the Sentinel MCP server as a Databricks App so it runs inside your
+# workspace over HTTPS and can be added to claude.ai as a Connector. The app's
+# runtime is configured in databricks_mcp/app.yaml.
+#
+# Usage:
+#   databricks bundle validate            # check this file
+#   databricks bundle deploy -t dev       # upload databricks_mcp/ and create the app
+#   databricks bundle run sentinel_mcp -t dev   # start it
+#
+# After deployment the MCP endpoint is https://<app-url>/mcp — that URL is what a
+# Claude connector points at. See databricks_mcp/README.md for the full walkthrough,
+# including granting the app's service principal access to the warehouse and tables.
+
+bundle:
+  name: sentinel
+
+resources:
+  apps:
+    sentinel_mcp:
+      # The name starts with "mcp-" so Databricks recognises it as an MCP server
+      # (e.g. in the AI Playground). In development mode it is prefixed per user.
+      name: mcp-sentinel-databricks
+      description: "MCP server exposing Sentinel's Databricks tables and workspace operations to Claude."
+      source_code_path: ./databricks_mcp
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://YOUR-WORKSPACE.cloud.databricks.com
+
+  # Uncomment and adjust for a stable, non-prefixed deployment.
+  # prod:
+  #   mode: production
+  #   workspace:
+  #     host: https://YOUR-WORKSPACE.cloud.databricks.com

@@ -156,23 +156,48 @@ loaded"* or *"preview 10 rows of klines_1m for BTCUSDT"*.
 
 A browser can't spawn a local process, so for **claude.ai** the server has to run
 somewhere reachable over HTTPS and be added as a **Connector** (Settings ->
-Connectors -> Add custom connector -> the server's URL). The same code serves this
-mode — run it with `MCP_TRANSPORT=http` instead of stdio:
+Connectors -> Add custom connector -> the server's `/mcp` URL). The natural home is
+a **Databricks App**: it runs inside your workspace, sits behind Databricks OAuth,
+and executes as its own **service principal** — whose Unity Catalog grants become
+the safety boundary — so no personal token travels anywhere.
+
+This repo ships the deployment as a bundle. The pieces:
+
+- `app_http.py` — serves the MCP endpoint over HTTP at `/mcp`, binding to the port
+  Databricks injects (`DATABRICKS_APP_PORT`).
+- `app.yaml` — the app's runtime config (its command and environment).
+- `../databricks.yml` — the bundle that packages `databricks_mcp/` as an app named
+  `mcp-sentinel-databricks`.
+
+Deploy it (needs the [Databricks CLI](https://docs.databricks.com/dev-tools/cli/)
+and a login, e.g. `databricks auth login --host https://your-workspace...`):
 
 ```bash
-MCP_TRANSPORT=http DATABRICKS_HOST=... DATABRICKS_TOKEN=... DATABRICKS_WAREHOUSE_ID=... \
-  .venv/bin/python -m databricks_mcp.server        # serves on http://127.0.0.1:8000
+# from the repo root, after editing the host in databricks.yml and the
+# warehouse id in databricks_mcp/app.yaml
+databricks bundle validate
+databricks bundle deploy -t dev
+databricks bundle run sentinel_mcp -t dev
 ```
 
-For real use it needs a host. The natural home is a **Databricks App**: it runs
-inside your workspace, authenticates callers with Databricks OAuth, and executes
-under its own service principal (whose Unity Catalog grants become the safety
-boundary), so no personal token travels anywhere. That deployment is workspace-
-specific — package this as an app with an `app.yaml` whose command is
-`python -m databricks_mcp.server` with `MCP_TRANSPORT=http`, `databricks apps deploy`,
-then add the app's URL as a connector. Any HTTPS host works, but if you self-host
-elsewhere you must add authentication yourself — an open endpoint that can delete
-pipelines is exactly as bad as it sounds.
+The app's URL is shown in the workspace under **Compute -> Apps**; the connector
+URL is that URL plus `/mcp`.
+
+Two things to get right after deploying:
+
+1. **Grant the app's service principal access.** It needs `CAN USE` on the SQL
+   warehouse and `SELECT` on the `sentinel` schema (plus whatever a write tool would
+   touch, if you enable writes). The app authenticates as this principal
+   automatically — no token in `app.yaml`.
+2. **The connector's OAuth handshake** to a Databricks App is the step most likely
+   to need fiddling with your workspace SSO — validate it end to end before relying
+   on it. If you self-host anywhere other than a Databricks App, you must add
+   authentication yourself: an open endpoint that can delete pipelines is exactly
+   as bad as it sounds.
+
+> For a quick local HTTP check without deploying, you can also run the server in
+> HTTP mode directly: `MCP_TRANSPORT=http .venv/bin/python -m databricks_mcp.server`
+> (serves on `http://127.0.0.1:8000`).
 
 ### Enabling writes
 
