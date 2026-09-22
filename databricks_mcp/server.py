@@ -17,6 +17,7 @@ stdin/stdout. See ``README.md`` for the client configuration.
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 import time
@@ -167,6 +168,30 @@ def _run(statement: str) -> dict[str, Any]:
     return {"columns": columns, "rows": rows, "row_count": len(rows), "truncated": truncated}
 
 
+def _require_writes() -> None:
+    """Gate for any tool that changes the workspace.
+
+    Raises unless writes are explicitly enabled. The token's Unity Catalog and
+    workspace permissions are the real boundary; this flag just means a read-only
+    setup can't mutate anything even by mistake.
+    """
+    if not ALLOW_WRITES:
+        raise PermissionError(
+            "This operation changes your Databricks workspace and is disabled. "
+            "Set DATABRICKS_MCP_ALLOW_WRITES=1 and use a token permitted to make the change."
+        )
+
+
+def _api(method: str, path: str, body: Optional[dict] = None, query: Optional[dict] = None) -> Any:
+    """Call the Databricks REST API directly and return the parsed JSON.
+
+    This is the general lever the write tools are built on: the SDK's typed
+    helpers cover reads nicely, but create/update payloads for jobs, pipelines
+    and dashboards are large nested JSON, which the REST endpoints take as-is.
+    """
+    return client().api_client.do(method.upper(), path, body=body, query=query)
+
+
 # --- Tools ------------------------------------------------------------------
 
 @server.tool()
@@ -307,7 +332,77 @@ def trigger_job(job_id: int) -> dict:
     return {"job_id": job_id, "run_id": getattr(waiter, "run_id", None), "status": "started"}
 
 
+@server.tool()
+def import_notebook(
+    workspace_path: str, source: str, language: str = "PYTHON", overwrite: bool = True
+) -> dict:
+    """Create or overwrite a notebook / Python file in the workspace.
+
+    This is "add Python code directly inside Databricks": ``workspace_path`` is an
+    absolute path such as ``/Workspace/Users/you@example.com/sentinel/new_notebook``,
+    ``source`` is the file's text (a source-format ``.py`` notebook or plain
+    Python), and ``language`` is one of PYTHON / SQL / SCALA / R. Requires writes.
+    """
+    _require_writes()
+    encoded = base64.b64encode(source.encode("utf-8")).decode("ascii")
+    _api(
+        "POST",
+        "/api/2.0/workspace/import",
+        body={
+            "path": workspace_path,
+            "format": "SOURCE",
+            "language": language,
+            "content": encoded,
+            "overwrite": overwrite,
+        },
+    )
+    return {"status": "imported", "path": workspace_path, "language": language}
+
+
+@server.tool()
+def delete_workspace_object(workspace_path: str, recursive: bool = False) -> dict:
+    """Delete a notebook, file or folder from the workspace.
+
+    Set ``recursive=True`` to remove a non-empty folder. Requires writes.
+    """
+    _require_writes()
+    _api("POST", "/api/2.0/workspace/delete", body={"path": workspace_path, "recursive": recursive})
+    return {"status": "deleted", "path": workspace_path}
+
+
+@server.tool()
+def databricks_request(method: str, path: str, body: Optional[dict] = None) -> Any:
+    """Call any Databricks REST endpoint — the general lever for building, changing
+    and deleting jobs, pipelines and dashboards.
+
+    ``GET`` is always allowed; any other method requires writes. ``path`` starts
+    with ``/api/...`` and ``body`` is the JSON the endpoint documents. Examples:
+
+    - Create a job:       POST   /api/2.1/jobs/create          {"name": ..., "tasks": [...]}
+    - Update a job:       POST   /api/2.1/jobs/reset           {"job_id": ..., "new_settings": {...}}
+    - Delete a job:       POST   /api/2.1/jobs/delete          {"job_id": 123}
+    - Create a pipeline:  POST   /api/2.0/pipelines            {"name": ..., "libraries": [...]}
+    - Delete a pipeline:  DELETE /api/2.0/pipelines/{id}
+    - Create a dashboard: POST   /api/2.0/lakeview/dashboards  {"display_name": ..., "serialized_dashboard": ...}
+    - Delete a dashboard: DELETE /api/2.0/lakeview/dashboards/{id}
+
+    Prefer the specific tools (preview_table, import_notebook, ...) when one fits;
+    reach for this when nothing else does.
+    """
+    if method.upper() != "GET":
+        _require_writes()
+    return _api(method, path, body=body)
+
+
 if __name__ == "__main__":
-    # stdio transport: the Claude client spawns this process and speaks MCP over
-    # stdin/stdout.
-    server.run(transport="stdio")
+    # Transport selection:
+    #   stdio (default)  -> a local client (Claude Desktop, Claude Code) spawns
+    #                       this process and speaks MCP over stdin/stdout.
+    #   http             -> a long-running HTTP server, so the same code can be
+    #                       hosted (e.g. as a Databricks App) and added to
+    #                       claude.ai as a Connector, reachable from the browser.
+    transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
+    if transport in ("http", "streamable-http"):
+        server.run(transport="streamable-http")
+    else:
+        server.run(transport="stdio")

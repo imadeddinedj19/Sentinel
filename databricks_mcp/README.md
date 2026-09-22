@@ -1,16 +1,20 @@
 # Sentinel Databricks MCP server
 
-A small **MCP (Model Context Protocol)** server that lets a Claude client explore
-and query the Unity Catalog tables this project writes — `workspace.sentinel.agg_trades`
-and `workspace.sentinel.klines_1m` — directly from a chat, instead of you
-copy-pasting SQL into the Databricks UI and results back out.
+A small **MCP (Model Context Protocol)** server that lets a Claude client explore,
+query, and (optionally) manage the Databricks workspace behind this project —
+starting with the Unity Catalog tables the ingest notebook writes,
+`workspace.sentinel.agg_trades` and `workspace.sentinel.klines_1m` — directly from
+a chat, instead of clicking around the Databricks UI.
 
 MCP is the open protocol Claude uses to talk to external tools. You run a
 **server** that exposes **tools** (functions Claude can call); the Claude client
-is the **host** that decides when to call them. This server's tools wrap the
-Databricks SDK's Statement Execution API against a SQL warehouse.
+is the **host** that decides when to call them. The read tools wrap the Databricks
+SDK's Statement Execution API against a SQL warehouse; the write tools call the
+Databricks REST API to create, change, and delete workspace objects.
 
 ## What it can do
+
+Read tools (always on):
 
 | Tool | What it does |
 | --- | --- |
@@ -22,7 +26,19 @@ Databricks SDK's Statement Execution API against a SQL warehouse.
 | `sentinel_data_summary` | Per-`(symbol, month)` row counts and time bounds across both tables |
 | `list_jobs` | List Databricks Jobs (find your ingest job) |
 | `recent_job_runs` | Recent run status for a job — "did my ingest succeed?" |
-| `trigger_job` | Start a job now (write; off unless writes are enabled) |
+
+Write tools (off unless `DATABRICKS_MCP_ALLOW_WRITES=1`):
+
+| Tool | What it does |
+| --- | --- |
+| `import_notebook` | Create/overwrite a notebook or Python file in the workspace |
+| `delete_workspace_object` | Delete a notebook, file, or folder |
+| `trigger_job` | Start a job now |
+| `databricks_request` | Call any Databricks REST endpoint — the general lever for creating, changing, and deleting jobs, pipelines, and dashboards |
+
+The last one is deliberately general: rather than a wrapper per resource, Claude
+composes the documented REST calls (create a job, delete a pipeline, publish a
+dashboard). `GET` is always allowed; anything that mutates needs writes enabled.
 
 ## Prerequisites
 
@@ -66,10 +82,22 @@ to call a tool.
 
 ## Register with a Claude client
 
+There are two ways to run this server, and which one you need depends only on
+where you use Claude:
+
+- **Local (stdio)** — the client launches the server as a subprocess on your
+  machine. Works with **Claude Desktop** and **Claude Code**. Simplest; start here.
+- **Remote (HTTP)** — the server runs as a long-lived HTTP service you host, and
+  the client connects to its URL. This is the only option that also reaches
+  **claude.ai in the browser** (a browser can't launch a local process), and it
+  works for Desktop/Code too. See "Hosting it remotely" below.
+
+The tool surface is identical either way — only the plumbing differs.
+
+### Local — Claude Code (CLI) and Claude Desktop
+
 Use the **absolute path** to the venv's Python — the client won't have your venv
 activated. Replace `/home/user/Sentinel` with your repo path.
-
-### Claude Code (CLI)
 
 Either run:
 
@@ -124,10 +152,34 @@ Add the same server block to `claude_desktop_config.json`
 Then just ask, e.g. *"Using the sentinel-databricks tools, summarise what data is
 loaded"* or *"preview 10 rows of klines_1m for BTCUSDT"*.
 
-> **Claude Code on the web** runs in a sandbox and can't launch a local stdio
-> process like this, so this server is for the local CLI or the desktop app. For
-> a browser/remote setup, use a **remote MCP server over HTTP** instead — see
-> "Databricks' own managed MCP servers" below.
+### Remote — claude.ai in the browser (Connectors)
+
+A browser can't spawn a local process, so for **claude.ai** the server has to run
+somewhere reachable over HTTPS and be added as a **Connector** (Settings ->
+Connectors -> Add custom connector -> the server's URL). The same code serves this
+mode — run it with `MCP_TRANSPORT=http` instead of stdio:
+
+```bash
+MCP_TRANSPORT=http DATABRICKS_HOST=... DATABRICKS_TOKEN=... DATABRICKS_WAREHOUSE_ID=... \
+  .venv/bin/python -m databricks_mcp.server        # serves on http://127.0.0.1:8000
+```
+
+For real use it needs a host. The natural home is a **Databricks App**: it runs
+inside your workspace, authenticates callers with Databricks OAuth, and executes
+under its own service principal (whose Unity Catalog grants become the safety
+boundary), so no personal token travels anywhere. That deployment is workspace-
+specific — package this as an app with an `app.yaml` whose command is
+`python -m databricks_mcp.server` with `MCP_TRANSPORT=http`, `databricks apps deploy`,
+then add the app's URL as a connector. Any HTTPS host works, but if you self-host
+elsewhere you must add authentication yourself — an open endpoint that can delete
+pipelines is exactly as bad as it sounds.
+
+### Enabling writes
+
+All three surfaces run the same tools, but the write tools stay dormant until you
+opt in. Set `DATABRICKS_MCP_ALLOW_WRITES=1` in the server's environment (the `env`
+block, the `.env`, or the app config) **and** use a token/service principal that
+Unity Catalog actually permits to make the change. Both conditions must hold.
 
 ## Security notes (read this once)
 
@@ -136,8 +188,11 @@ loaded"* or *"preview 10 rows of klines_1m for BTCUSDT"*.
   Create the token under a principal with **read-only Unity Catalog grants** on
   the `sentinel` schema, and writes are impossible no matter what. This is
   *defence in depth*: an app-level guard **and** a permissions boundary.
-- **Writes are off by default.** `run_sql` refuses non-`SELECT` statements and
-  `trigger_job` refuses to run until you set `DATABRICKS_MCP_ALLOW_WRITES=1`.
+- **Writes are off by default.** `run_sql` refuses non-`SELECT` statements, and
+  every mutating tool (`import_notebook`, `delete_workspace_object`, `trigger_job`,
+  and any non-`GET` `databricks_request`) refuses until you set
+  `DATABRICKS_MCP_ALLOW_WRITES=1`. Even then, a mutation only succeeds if the
+  token's Unity Catalog / workspace permissions allow it.
 - **Keep secrets out of git.** `databricks_mcp/.env` is git-ignored. If you use
   `.mcp.json`, either keep tokens out of it (rely on `.env` / a `~/.databrickscfg`
   profile) or don't commit it.
