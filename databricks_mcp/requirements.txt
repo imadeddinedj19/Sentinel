@@ -1,0 +1,5 @@
+# Dependencies for the Databricks MCP server only — kept separate from the main
+# project so the core Sentinel package stays lightweight.
+mcp>=2.2
+databricks-sdk>=0.30
+python-dotenv>=1.0
